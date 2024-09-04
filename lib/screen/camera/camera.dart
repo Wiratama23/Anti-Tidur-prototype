@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 class Camera extends GetView<CamController> {
-  // final CamController controller = Get.put(FaceDetectionController());
 
   @override
   Widget build(BuildContext context) {
@@ -14,16 +13,12 @@ class Camera extends GetView<CamController> {
         title: Text('Face Detection'),
       ),
       body: Obx(() {
-        // Show loading indicator while the camera is initializing
         if (controller.isLoading.value) {
           return Center(child: CircularProgressIndicator());
         }
-
-        // Ensure camera controller is initialized before rendering the preview
         if (!controller.cameraController.value.isInitialized) {
           return Center(child: Text('Camera not initialized'));
         }
-
         return Column(
           children: [
             Expanded(
@@ -32,7 +27,6 @@ class Camera extends GetView<CamController> {
             Text('Left Eye Open Probability: ${controller.leftEyeOpenProb.value}'),
             Text('Right Eye Open Probability: ${controller.rightEyeOpenProb.value}'),
             Text('Smile Probability: ${controller.smileProb.value}'),
-            // You can add more UI elements here as needed
           ],
         );
       }),
