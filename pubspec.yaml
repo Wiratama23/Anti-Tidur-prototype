@@ -38,18 +38,19 @@ dependencies:
   get: ^4.6.6
   water_drop_nav_bar: ^2.2.2
   iconly: ^1.0.1
-  camera: ^0.11.0+2
+  camera: ^0.10.5+9
   flutter_vision: ^1.1.4
-  permission_handler: ^11.3.1
-  image: ^4.2.0
-  vibration: ^2.0.0
-  just_audio: ^0.9.40
-  noise_meter: ^5.0.2
-  flutter_audio_capture: ^1.1.7
+  permission_handler: ^10.4.5
+  image: ^3.0.2
+  vibration: ^1.7.3
+  just_audio: ^0.9.17
+  carousel_slider: ^4.0.0
+  noise_meter: ^4.0.0
+  flutter_audio_capture: ^1.0.0
   flutter_fft: ^1.0.2+6
   iirjdart: ^0.1.0
   shared_preferences: ^2.2.3
-  wakelock_plus: ^1.2.8
+  wakelock: ^0.6.2
 
 dev_dependencies:
   flutter_test:

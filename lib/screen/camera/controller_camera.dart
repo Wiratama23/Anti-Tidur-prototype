@@ -6,7 +6,6 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_vision/flutter_vision.dart';
 import 'package:get/get.dart';
-import 'package:get/get_rx/src/rx_workers/utils/debouncer.dart';
 import 'package:permission_handler/permission_handler.dart';
 // import 'package:tflite_v2/tflite_v2.dart';
 import 'package:flutter/services.dart'; // Import this for vibration
@@ -32,7 +31,6 @@ class CamController extends GetxController {
   FlutterVision vision = FlutterVision();
   late CameraController cameraController;
   late List<CameraDescription> cameras;
-  final _debouncer = Debouncer(delay: const Duration(milliseconds: 500));
   RxBool isCameraInit = false.obs;
   RxBool isLoaded = false.obs;
   RxInt cameraCount = 0.obs;
@@ -104,7 +102,7 @@ class CamController extends GetxController {
       final int uvRowStride = image.planes[1].bytesPerRow;
       final int uvPixelStride = image.planes[1].bytesPerPixel ?? 1;
 
-      final imageLib.Image tempImage = imageLib.Image(width: width, height: height);
+      final imageLib.Image tempImage = imageLib.Image(width, height);
 
       for (int y = y1; y < y2; y++) {
         for (int x = x1; x < x2; x++) {
@@ -363,6 +361,12 @@ class CamController extends GetxController {
     Get.toNamed("/home");
   }
 
+  @override
+  void onInit(){
+    super.onInit();
+    initCamera();
+    initTFLite();
+  }
   toDashboard() {
     if (isCameraInit.isTrue && isLoaded.isTrue) {
       vision.closeYoloModel();
