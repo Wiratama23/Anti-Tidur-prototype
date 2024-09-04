@@ -1,398 +1,376 @@
-import 'package:image/image.dart' as imglib;
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:image/image.dart' as imageLib;
+
 import 'package:camera/camera.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_vision/flutter_vision.dart';
 import 'package:get/get.dart';
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:get/get_rx/src/rx_workers/utils/debouncer.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:io';
-import 'dart:math';
+// import 'package:tflite_v2/tflite_v2.dart';
+import 'package:flutter/services.dart'; // Import this for vibration
 import 'package:vibration/vibration.dart';
+import 'package:just_audio/just_audio.dart';
 
+final player = AudioPlayer();
 
+double root(num value, num rootDegree) {
+  // Check dulu benar apa kagak
+  if (rootDegree <= 0) {
+    throw ArgumentError('Must positive');
+  }
+  return math.pow(value, 1 / rootDegree).toDouble();
+}
 
 class CamController extends GetxController {
+  // RxList<MapEntry<Map<String, double>, String>> boundingBoxes =
+  //     <MapEntry<Map<String, double>, String>>[].obs;
+  RxList<Uint8List> capturedImages = <Uint8List>[].obs;
+  RxInt currentCameraIndex = 0.obs;
+  RxString modelPath = 'assets/eepy_v16_float16.tflite'.obs;
+  FlutterVision vision = FlutterVision();
   late CameraController cameraController;
-  late FaceDetector _faceDetector;
-  bool isDetecting = false;
-  double currentProgress = 0.0;
-  final double activThreshold = 0.3;
-  final int threshold = 5;
-  bool isPlaying = false;
-  final player = AudioPlayer();
-
-  var isLoading = true.obs;
-  var leftEyeHistory = <double>[].obs;
-  var rightEyeHistory = <double>[].obs;
-  var leftEyeOpenProb = 1.0.obs;
-  var rightEyeOpenProb = 1.0.obs;
-  var smileProb = 1.0.obs;
-  var trackingId = 0.obs;
-  var landmarks = <Point>[].obs;
+  late List<CameraDescription> cameras;
+  final _debouncer = Debouncer(delay: const Duration(milliseconds: 500));
+  RxBool isCameraInit = false.obs;
+  RxBool isLoaded = false.obs;
+  RxInt cameraCount = 0.obs;
+  RxDouble width = 0.0.obs;
+  RxList<MapEntry<Map<String, double>, String>> boundingBoxes =
+      <MapEntry<Map<String, double>, String>>[].obs;
+  RxDouble height = 0.0.obs;
+  RxDouble x1 = 0.0.obs;
+  RxDouble x2 = 0.0.obs;
+  RxDouble y1 = 0.0.obs;
+  RxDouble y2 = 0.0.obs;
+  RxString model = "".obs;
+  RxString labels = "".obs;
+  RxString rawlabel = "".obs;
+  RxString name = "".obs;
+  RxString diagnose = "".obs;
+  RxString accuracy = "".obs;
+  RxDouble camwidth = 0.0.obs;
+  RxDouble camheight = 0.0.obs;
   int frameCount = 0;
+  bool isDetecting = false;
+  int frameDetect = 0;
+  int mataTertutupFrameCount = 0;
+  RxInt eyeDurationThreshold = 5.obs;
+  var isDarkMode = false.obs;
+  var showSlider = false.obs;
+  int progress_activation = 0;
+  bool isPlaying = false;
 
-  final Map<DeviceOrientation, int> _orientations = {
-    DeviceOrientation.portraitUp: 0,
-    DeviceOrientation.landscapeLeft: 90,
-    DeviceOrientation.portraitDown: 180,
-    DeviceOrientation.landscapeRight: 270,
-  };
-
-  @override
-  void onInit() {
-    super.onInit();
-    _initializeFaceDetector();
-    _requestPermissions();
+  void toggleDarkMode() {
+    isDarkMode.value = !isDarkMode.value;
   }
 
-  void _initializeFaceDetector() {
-    final options = FaceDetectorOptions(
-      enableContours: false,
-      enableLandmarks: true,
-      enableClassification: true,
-    );
-    _faceDetector = FaceDetector(options: options);
-  }
+  Future<void> changeModel(String newModelPath) async {
+    try {
+      // Unload the current model
+      await vision.closeYoloModel();
 
-  Future<void> _requestPermissions() async {
-    if (await Permission.camera.request().isGranted) {
-      _initializeCamera();
-    } else {
-      Get.snackbar('Permission Denied', 'Camera permission is required to proceed.');
+      // Update the model path
+      modelPath.value = newModelPath;
+
+      // Load the new model
+      await initTFLite();
+
+      // Reinitialize the camera
+      await cameraController.dispose();
+      await initCamera();
+    } catch (e) {
+      print("Error changing model: $e");
     }
   }
 
-  void _initializeCamera() async {
-    isLoading.value = true;
-
+  void captureFrame(
+      CameraImage image, double left, double top, double right, double bottom) {
     try {
-      final cameras = await availableCameras();
-      final firstCamera = cameras.first;
+      int x1 = (left * image.width).round();
+      int y1 = (top * image.height).round();
+      int x2 = (right * image.width).round();
+      int y2 = (bottom * image.height).round();
+
+      final int width = x2 - x1;
+      final int height = y2 - y1;
+
+      final Uint8List yPlane = image.planes[0].bytes;
+      final Uint8List uPlane = image.planes[1].bytes;
+      final Uint8List vPlane = image.planes[2].bytes;
+
+      final int yRowStride = image.planes[0].bytesPerRow;
+      final int uvRowStride = image.planes[1].bytesPerRow;
+      final int uvPixelStride = image.planes[1].bytesPerPixel ?? 1;
+
+      final imageLib.Image tempImage = imageLib.Image(width: width, height: height);
+
+      for (int y = y1; y < y2; y++) {
+        for (int x = x1; x < x2; x++) {
+          final int uvIndex = uvPixelStride * ((x / 2).floor() - x1 ~/ 2) +
+              uvRowStride * ((y / 2).floor() - y1 ~/ 2);
+          final int yIndex = y * yRowStride + x;
+
+          final int yp = yPlane[yIndex];
+          final int up = uPlane[uvIndex];
+          final int vp = vPlane[uvIndex];
+
+          // Convert pixel from YUV to RGB
+          int r = (yp + vp * 1436 / 1024 - 179).round().clamp(0, 255);
+          int g = (yp - up * 46549 / 131072 + 44 - vp * 93604 / 131072 + 91)
+              .round()
+              .clamp(0, 255);
+          int b = (yp + up * 1814 / 1024 - 227).round().clamp(0, 255);
+
+          // Set pixel color in image
+          tempImage.setPixelRgba(x - x1, y - y1, r, g, b,0);
+        }
+      }
+
+      // Encode image to PNG
+      Uint8List png =
+      Uint8List.fromList(imageLib.encodePng(tempImage));
+
+      capturedImages.add(png);
+
+      if (capturedImages.length > 2) {
+        capturedImages.removeAt(0);
+      }
+    } catch (e) {
+      print("Error capturing frame: $e");
+    }
+  }
+
+  void switchCamera() async {
+    currentCameraIndex.value = (currentCameraIndex.value + 1) % cameras.length;
+    await cameraController.dispose();
+    cameraController = CameraController(
+      cameras[currentCameraIndex.value],
+      ResolutionPreset.max,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+      enableAudio: false,
+    );
+    await cameraController.initialize().then((value) {
+      cameraController.startImageStream((image) {
+        frameCount++;
+        if (frameCount % 5 == 0 && !isDetecting) {
+          frameCount = 0;
+          objectDetector(image);
+        }
+        update();
+        isCameraInit(true);
+      });
+    });
+    update();
+  }
+
+  checkPermission(Permission permission, String classifies) async {
+    final status = await permission.request();
+    if (status.isGranted) {
+      classify(classifies);
+    } else {
+      Get.snackbar("Eror", "Permission is not granted");
+    }
+  }
+
+  classify(String classify) async {
+    update();
+    print("ini modelnya ${model.value}");
+    print("ini labelnya ${labels.value}");
+    await initTFLite();
+    if (isCameraInit.isFalse) {
+      initCamera();
+    } else {
+      cameraController.resumePreview();
+    }
+    toCamera();
+  }
+
+  initCamera() async {
+    if (await Permission.camera.request().isGranted) {
+      cameras = await availableCameras();
+
+      final orientation = MediaQuery.of(Get.context!).orientation;
+
+      ResolutionPreset resolutionPreset;
+      if (orientation == Orientation.portrait) {
+        resolutionPreset = ResolutionPreset.high;
+      } else {
+        resolutionPreset = ResolutionPreset.ultraHigh;
+      }
+
       cameraController = CameraController(
-        firstCamera,
-        ResolutionPreset.medium,
-        enableAudio: true,
-        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888
+        cameras[currentCameraIndex.value],
+        resolutionPreset,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+        enableAudio: false,
       );
-      await cameraController.initialize();
-      cameraController.startVideoRecording();
-      await cameraController.lockCaptureOrientation(DeviceOrientation.portraitUp);
+
       await cameraController.initialize().then((value) {
         cameraController.startImageStream((image) {
-          print("1");
           frameCount++;
-          print("print1 ${cameraController.imageFormatGroup}");
-          if (frameCount % 5 == 0 ) {
-            print("2");
+          if (frameCount % 5 == 0 && !isDetecting) {
             frameCount = 0;
-            _detectFaces(image);
+            objectDetector(image);
           }
           update();
-          // isCameraInit(true);
+          isCameraInit(true);
         });
       });
-      // cameraController.startImageStream((CameraImage image) {
-      //   print("yes behrad");
-      //   frameCount++;
-      //   if (frameCount % 10 == 0) { // && !isDetecting
-      //     print("yes behrad");
-      //     frameCount = 0;
-      //     _detectFaces(image);
-      //   }
-      //   update();
-      // });
-    } catch (e) {
-      Get.snackbar('Camera Error', 'Failed to initialize camera: $e');
-    } finally {
-      isLoading.value = false;
+      update();
+    } else {
+      print("permission denied");
     }
   }
 
-
-  Uint8List _convertYUV420ToNV21(CameraImage image) {
-    final int width = image.width;
-    final int height = image.height;
-
-    // The Y (luminance) plane should have width * height pixels
-    final int ySize = width * height;
-
-    // The U and V (chrominance) planes are half the resolution of Y, so they should be width/2 * height/2 each
-    final int uvSize = ((width / 2).floor()) * ((height / 2).floor()) * 2; // *2 because NV21 interleaves U and V
-
-    // Create NV21 byte array
-    final nv21 = Uint8List(ySize + uvSize);
-
-    // Copy Y plane
-    nv21.setRange(0, ySize, image.planes[0].bytes);
-
-    // Copy UV planes: VU order (NV21 format)
-    for (int i = 0; i < uvSize / 2; i++) {
-      final int uIndex = image.planes[1].bytesPerRow * (i ~/ (width ~/ 2)) + (i % (width ~/ 2)) * image.planes[1].bytesPerPixel!;
-      final int vIndex = image.planes[2].bytesPerRow * (i ~/ (width ~/ 2)) + (i % (width ~/ 2)) * image.planes[2].bytesPerPixel!;
-
-      nv21[ySize + 2 * i] = image.planes[2].bytes[vIndex];     // V
-      nv21[ySize + 2 * i + 1] = image.planes[1].bytes[uIndex]; // U
-    }
-
-    return nv21;
+  testOut() {
+    print("ini berubah ${eyeDurationThreshold.value}");
   }
 
-
-
-
-  Uint8List _convertYUV420ToBGRA8888(CameraImage image) {
-    final int width = image.width;
-    final int height = image.height;
-    final int uvRowStride = image.planes[1].bytesPerRow;
-    final int uvPixelStride = image.planes[1].bytesPerPixel!;
-
-    final imglib.Image imgBuffer = imglib.Image(width: width, height: height);
-
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final int uvIndex = (x / 2).floor() * uvPixelStride + (y / 2).floor() * uvRowStride;
-        final int yIndex = x + y * width;
-
-        final int yValue = image.planes[0].bytes[yIndex];
-        final int uValue = image.planes[1].bytes[uvIndex];
-        final int vValue = image.planes[2].bytes[uvIndex];
-
-        final int r = (yValue + 1.402 * (vValue - 128)).clamp(0, 255).toInt();
-        final int g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255).toInt();
-        final int b = (yValue + 1.772 * (uValue - 128)).clamp(0, 255).toInt();
-
-        imgBuffer.setPixel(x, y, imglib.ColorFloat32.rgb(r / 255.0, g / 255.0, b / 255.0));
-      }
-    }
-
-    // Convert to BGRA8888
-    return imglib.encodePng(imgBuffer);
-  }
-
-  InputImage? _inputImageFromCameraImage(CameraImage image) {
-    final camera = cameraController.description;
-    final sensorOrientation = camera.sensorOrientation;
-    InputImageRotation? rotation;
-
-    if (Platform.isIOS) {
-      rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-    } else if (Platform.isAndroid) {
-      final rotationCompensation = _orientations[cameraController.value.deviceOrientation] ?? 0;
-      if (camera.lensDirection == CameraLensDirection.front) {
-        rotation = InputImageRotationValue.fromRawValue(
-            (sensorOrientation + rotationCompensation) % 360);
-      } else {
-        rotation = InputImageRotationValue.fromRawValue(
-            (sensorOrientation - rotationCompensation + 360) % 360);
-      }
-    }
-
-    if (rotation == null) return null;
-
-    Uint8List? convertedBytes;
-    InputImageFormat? format;
-
-    if (Platform.isAndroid) {
-      convertedBytes = _convertYUV420ToNV21(image);
-      format = InputImageFormat.nv21;
-    } else if (Platform.isIOS) {
-      convertedBytes = _convertYUV420ToBGRA8888(image);
-      format = InputImageFormat.bgra8888;
-    }
-
-    if (convertedBytes == null || format == null) return null;
-
-    return InputImage.fromBytes(
-      bytes: convertedBytes,
-      metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      ),
-    );
-  }
-
-
-  // InputImage? _inputImageFromCameraImage(CameraImage image) {
-  //   final camera = cameraController.description;
-  //   final sensorOrientation = camera.sensorOrientation;
-  //   InputImageRotation? rotation;
-  //
-  //   if (Platform.isIOS) {
-  //     rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-  //   } else if (Platform.isAndroid) {
-  //     print("platform is android");
-  //     final rotationCompensation =
-  //         _orientations[cameraController.value.deviceOrientation] ?? 0;
-  //     print("rotationcomp");
-  //     if (camera.lensDirection == CameraLensDirection.front) {
-  //       rotation = InputImageRotationValue.fromRawValue(
-  //           ((sensorOrientation + rotationCompensation) % 360));
-  //       print("rotation 1");
-  //     } else {
-  //       rotation = InputImageRotationValue.fromRawValue(
-  //           ((sensorOrientation - rotationCompensation + 360) % 360));
-  //       print("rotation 2");
-  //     }
-  //   }
-  //
-  //   print("rotation: $rotation");
-  //   if (rotation == null) return null;
-  //
-  //   Uint8List? convertedBytes;
-  //   InputImageFormat? format;
-  //
-  //   if (Platform.isAndroid) {
-  //     convertedBytes = _convertYUV420ToNV21(image);
-  //     format = InputImageFormat.nv21;
-  //   } else if (Platform.isIOS) {
-  //     convertedBytes = _convertYUV420ToBGRA8888(image);
-  //     format = InputImageFormat.bgra8888;
-  //   }
-  //
-  //   if (convertedBytes == null || format == null) return null;
-  //   // final format = InputImageFormatValue.fromRawValue(image.format.raw);
-  //   // print("image format ${image.format.raw}");
-  //   // print("format $format");
-  //   // if (format == null ||
-  //   //     (Platform.isAndroid && format != InputImageFormat.nv21) ||
-  //   //     (Platform.isIOS && format != InputImageFormat.bgra8888)) return null;
-  //   // Uint8List? convertedBytes;
-  //   // if (Platform.isAndroid) {
-  //   //   convertedBytes = _convertYUV420ToNV21(image);
-  //   //   format! = InputImageFormat.nv21;
-  //   // } else if (Platform.isIOS) {
-  //   //   convertedBytes = _convertYUV420ToBGRA8888(image);
-  //   //   format! = InputImageFormat.bgra8888;
-  //   // }
-  //   // final format = InputImageFormatValue.fromRawValue(image.format.raw);
-  //   // print("image format ${image.format.raw}");
-  //   // print("format $format");
-  //   //
-  //   // Uint8List? convertedBytes;
-  //   // InputImageFormat? newFormat;
-  //
-  //   // if (Platform.isAndroid) {
-  //   //   convertedBytes = _convertYUV420ToNV21(image);
-  //   //   newFormat = InputImageFormat.nv21;
-  //   // } else if (Platform.isIOS) {
-  //   //   convertedBytes = _convertYUV420ToBGRA8888(image);
-  //   //   newFormat = InputImageFormat.bgra8888;
-  //   // }
-  //
-  //   // Now you can use `newFormat` and `convertedBytes`
-  //   // if (convertedBytes != null && newFormat != null) {
-  //   //   // Process the image with the convertedBytes and newFormat
-  //   // } else {
-  //   //   print("Failed to convert image format");
-  //   // }
-  //
-  //   print("check 1");
-  //
-  //   final plane = image.planes.first;
-  //   print("check 2 ${plane.bytes}");
-  //   return InputImage.fromBytes(
-  //     bytes: plane.bytes,
-  //     metadata: InputImageMetadata(
-  //       size: Size(image.width.toDouble(), image.height.toDouble()),
-  //       rotation: rotation,
-  //       format: format,
-  //       bytesPerRow: plane.bytesPerRow,
-  //     ),
-  //   );
-  // }
-
-  void _detectFaces(CameraImage image) async {
+  objectDetector(CameraImage image) async {
     if (isDetecting) return;
     isDetecting = true;
-    print("masuk");
-    print(image.format.raw);
-    print("image ${image.format}");
-    final inputImage = _inputImageFromCameraImage(image);
-    print(inputImage);
-    if (inputImage == null) {
-      isDetecting = false;
-      return;
-    }
 
-    List<Face> faces = await _faceDetector.processImage(inputImage);
-    print("faces $faces");
+    // Determine if the front camera is being used
+    final isFrontCamera = cameras[currentCameraIndex.value].lensDirection ==
+        CameraLensDirection.front;
 
-    if (faces.isNotEmpty) {
-      print("face detected");
-      final face = faces.first;
+    try {
+      final detector = await vision.yoloOnFrame(
+        bytesList: image.planes.map((plane) => plane.bytes).toList(),
+        imageHeight: image.height,
+        imageWidth: image.width,
+        iouThreshold: 0.3,
+        confThreshold: 0.3,
+        classThreshold: 0.3,
+      );
 
-      double leftEyeOpenProbNorm =
-          face.leftEyeOpenProbability ?? 1.0;
-      double rightEyeOpenProbNorm =
-          face.rightEyeOpenProbability ?? 1.0;
+      boundingBoxes.clear(); // Clear the list before adding new bounding boxes
 
-      leftEyeHistory.add(leftEyeOpenProbNorm);
-      rightEyeHistory.add(rightEyeOpenProbNorm);
-      if (leftEyeHistory.length > 50) leftEyeHistory.removeAt(0);
-      if (rightEyeHistory.length > 50) rightEyeHistory.removeAt(0);
+      bool mataTertutupDetected =
+      false; // Flag to track if "Mata tertutup" is detected
 
-      if (leftEyeOpenProbNorm < activThreshold ||
-          rightEyeOpenProbNorm < activThreshold) {
-        if (currentProgress < threshold) {
-          currentProgress++;
-        }
-      } else {
-        if (currentProgress >= 0) {
-          currentProgress -= 2;
-        } else {
-          currentProgress = 0;
+      for (final detectedObject in detector) {
+        final left = detectedObject['box'][0];
+        final top = detectedObject['box'][1];
+        final right = left + detectedObject['box'][2];
+        final bottom = top + detectedObject['box'][3];
+        final confidence = detectedObject['box'][4];
+        final label = detectedObject['tag'];
+
+        if (confidence > 0.3) {
+          // Calculate bounding box coordinates
+          double normalizedLeft = math.pow(left, 1.1) / image.width;
+          double normalizedTop = root(top, 1.129) / image.height;
+          double normalizedRight = math.pow(right, 1.01) / image.width;
+          double normalizedBottom = root(bottom, 1.2) / image.height;
+
+          // Adjust top and bottom coordinates if the label starts with "Mata" or "Mulut"
+          if (label.startsWith("Mata") || label.startsWith("Mulut")) {
+            normalizedTop -= 60 / image.height;
+            normalizedBottom -= 60 / image.height;
+          }
+
+          // Invert left and right coordinates if using the front camera
+          if (isFrontCamera) {
+            normalizedRight = normalizedRight + 0.1;
+            double tmpTop = normalizedTop;
+            normalizedTop = 0.8 - normalizedBottom;
+            normalizedBottom = 0.8 - tmpTop;
+          }
+
+          // Add bounding box and label to the list
+          boundingBoxes.add(
+            MapEntry(
+              {
+                'left': normalizedLeft,
+                'top': normalizedTop,
+                'right': normalizedRight,
+                'bottom': normalizedBottom,
+              },
+              label,
+            ),
+          );
+
+          if (label == "Mata tertutup") {
+            mataTertutupDetected =
+            true; // Set the flag if "Mata tertutup" is detected
+          }
         }
       }
 
-      if (currentProgress == threshold) {
-        Vibration.vibrate(duration: 1000);
-        if (!isPlaying) {
-          await player
-              .setLoopMode(LoopMode.one);
-          await player.setAsset('assets/warn.mp3');
-          player.play();
-          isPlaying = true;
+      print("Current Object detection $boundingBoxes");
 
-          SharedPreferences prefs = await SharedPreferences.getInstance();
-          int sleepCount = (prefs.getInt('sleepCount') ?? 0) + 1;
-          await prefs.setInt('sleepCount', sleepCount);
+      if (mataTertutupDetected) {
+        mataTertutupFrameCount++;
+
+        // Vibrate the phone if "Mata tertutup" is detected for more than 5 consecutive frames
+        if (mataTertutupFrameCount > eyeDurationThreshold.value) {
+          Vibration.vibrate(
+              duration: 1000); // Vibrate the device for 1 second
+          if (!isPlaying) {
+            player.setLoopMode(LoopMode.one);
+            player.setAsset('assets/warn.mp3');
+            // Set the player to loop the audio// Set the audio file
+            player.play(); // Start playing the warning sound
+            isPlaying = true;
+          }
         }
       } else {
-        print("face not detected");
-        player.stop();
+        mataTertutupFrameCount =
+        0; // Reset the counter if "Mata tertutup" is not detected
+        player.stop(); // Stop the warning sound
         isPlaying = false;
       }
 
-      leftEyeOpenProb.value = face.leftEyeOpenProbability ?? 1.0;
-      rightEyeOpenProb.value = face.rightEyeOpenProbability ?? 1.0;
-      smileProb.value = face.smilingProbability ?? 1.0;
-      trackingId.value = face.trackingId ?? 0;
-      landmarks.value = [    face.landmarks[FaceLandmarkType.bottomMouth]?.position ??
-          const Point(0, 0),
-        face.landmarks[FaceLandmarkType.leftMouth]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.rightMouth]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.leftEye]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.rightEye]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.noseBase]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.rightCheek]?.position ??
-            const Point(0, 0),
-        face.landmarks[FaceLandmarkType.leftCheek]?.position ??
-            const Point(0, 0),
-      ];
       update();
+    } catch (e) {
+      print("Error in object detection: $e");
+    } finally {
+      isDetecting = false;
     }
-    print("not detected any");
-    isDetecting = false;
   }
 
-  @override void onClose() { cameraController.dispose(); _faceDetector.close(); player.dispose(); super.onClose(); }
+  initTFLite() async {
+    try {
+      await vision.closeYoloModel();
+      await vision.loadYoloModel(
+          labels: 'assets/eepy_label.txt',
+          modelPath: modelPath.value, // Use the modelPath value
+          modelVersion: "yolov8",
+          quantization: false,
+          numThreads: 4,
+          useGpu: true);
+      isLoaded(true);
+    } catch (e) {
+      print(e);
+    }
+  }
 
+  void closeTFLiteResources() {
+    model.value = "";
+    labels.value = "";
+    isLoaded(false);
+  }
+
+  void disposeCamera() {
+    cameraController.pausePreview();
+    // isCameraInit(false);
+  }
+
+  toCamera() {
+    Get.toNamed("/home");
+  }
+
+  toDashboard() {
+    if (isCameraInit.isTrue && isLoaded.isTrue) {
+      vision.closeYoloModel();
+      closeTFLiteResources();
+      disposeCamera();
+      Get.toNamed("/dashboard");
+    } else {
+      Get.snackbar("Error", "Wait for a while");
+    }
+  }
 }
